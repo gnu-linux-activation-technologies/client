@@ -173,12 +173,12 @@ sub do_daemon {
 			# (until the next check two weeks from now)
 			if ($is_activated) {
 				# log to syslog
-				system("logger -i -p user.info -t $PROGRAM_NAME This copy of GNU/Linux is activated. See https://github.com/gnu-linux-activation-technologies/howtotell/wiki/ for details.");
+				system("logger -i -p user.info -t $PROGRAM_NAME This copy of GNU/Linux is activated. See https://github.com/gnu-linux-activation-technologies/howtotell/ for details.");
 				
 			# the key server has decided this GNU/Linux copy is not activated
 			} else {
 				# log to syslog
-				system("logger -i -p user.info -t $PROGRAM_NAME This copy of GNU/Linux is not activated. See https://github.com/gnu-linux-activation-technologies/howtotell/wiki/ for details.");
+				system("logger -i -p user.info -t $PROGRAM_NAME This copy of GNU/Linux is not activated. See https://github.com/gnu-linux-activation-technologies/howtotell/ for details.");
 			}
 		}
 		
