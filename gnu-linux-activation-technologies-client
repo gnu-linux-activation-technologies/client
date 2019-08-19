@@ -1,0 +1,346 @@
+#!/usr/bin/perl
+
+##############################################################################
+# GNU/Linux Activation Technologies client                                   #
+#                                                                            #
+# http://www.linuxgenuineadvantage.org                                       #
+# https://github.com/gnu-linux-activation-technologies/client/               #
+#                                                                            #
+# Copyright (C) 2007 Linux Genuine Advantage                                 #
+# Copyright (C) 2019 GNU/Linux Activation Technologies                       #
+#                                                                            #
+# This program makes sure that a given copy of GNU/Linux is activated. This  #
+# is determined by key server every two weeks. Activation state will be      #
+# logged so system administrator will know if something went wrong           #
+#                                                                            #
+# gnu-linux-activation-technologies comes with ABSOLUTELY NO WARRANTY. This  #
+# is free software, and you may copy, distribute and/or modify it under the  #
+# terms of the GNU GPL (version 2 or at your option any later version).      #
+# See the GNU General Public License (in file: COPYING) for details.         #
+##############################################################################
+
+########################################
+#           STANDARD MODULES           #
+########################################
+
+# 'use warnings' will not work in the earliest versions of perl 5
+# users with these systems will not be able to activate their GNU/Linux copies
+
+use strict;
+use warnings;
+use CGI qw( escape );
+use IO::Socket::INET;
+
+########################################
+#           DECLARE VARIABLES          #
+########################################
+
+my $PROGRAM_NAME = 'gnu-linux-activation-technologies';
+my $VERSION = '1.0.0';
+
+# operational mode
+my $cmd = undef;
+
+# config directory and product key locations
+my $config_directory = '/etc/gnu-linux-activation-technologies';
+my $config_key_file  = $config_directory . '/product-key';
+
+# Domain and URL to send product key and hardware hash to.
+my $verify_domain	= 'localhost';
+my $verify_url		= '/verify/';
+
+# Channel
+my $channel = 'OEM';
+
+# we'll be nice and wait this many days before checking activation state
+my $grace_period = 30;
+
+# wait this long (in hours) before receiving remote instructions from a key server
+my $activation_state_check_interval = 24 * 14;
+
+########################################
+#        CORE PROGRAM STRUCTURE        #
+########################################
+
+if (! defined($ARGV[0])) {
+	show_usage();
+}
+
+# we have to be root to check is this GNU/Linux copy activated
+check_root();
+
+# figure out which mode to run in
+$cmd = $ARGV[0];
+if ('daemon' eq $cmd) {
+	do_daemon();
+} else {
+	show_usage();
+}
+
+# if we got here, it must have worked
+exit (0);
+
+########################################
+#             SUBROUTINES              #
+########################################
+
+# shows usage information and then exits
+#
+# accepts no arguments
+# exits the program with an error condition
+sub show_usage {
+	print STDERR "$PROGRAM_NAME version $VERSION\n";
+	print STDERR "Copyright (C) 2007 Linux Genuine Advantage\n";
+	print STDERR "<http://www.linuxgenuineadvantage.org/>\n";
+	print STDERR "Copyright (C) 2019 GNU/Linux Activation Technologies\n";
+	print STDERR "<https://github.com/gnu-linux-activation-technologies/client/>\n";
+	print STDERR "\n";
+	print STDERR "$PROGRAM_NAME comes with ABSOLUTELY NO WARRANTY. This is\n";
+	print STDERR "free software, and you are welcome to redistribute it under certain\n";
+	print STDERR "conditions. See the GNU General Public License for details.\n";
+	print STDERR "\n";
+	print STDERR "Usage: $PROGRAM_NAME [daemon]\n";
+	print STDERR "\n";
+	print STDERR "  daemon\n";
+	print STDERR "\n";
+	print STDERR "    Runs GNU/Linux Activation Technologies as daemon.\n";
+	print STDERR "\n";
+	print STDERR "If you want to delete product key, you need to remove product key file.\n";
+	print STDERR "If you use retail license, you should also open verify URL using your browser\n";
+	print STDERR "with your values (hwid and product key) and value \"delete\" set to 1.\n";
+	print STDERR "\n";
+	print STDERR "Contact your key server administrator in case of activation issues.\n";
+	print STDERR "\n";
+	
+	exit (1);
+}
+
+# shows an error message and then exits
+#
+# accepts an error string
+# exits the program with an error condition
+sub show_error {
+	my $str = shift(@_);
+	
+	print STDERR $PROGRAM_NAME;
+	if (defined($str)) {
+		print STDERR ': ' . $str;
+	}
+	print STDERR "\n";
+	exit (1);
+}
+
+# loop continuously, checking periodically to see is the given copy activated.
+# if it isn't after 30 days, start warning users.
+#
+# accepts no arguments
+# runs as a daemon forever (called from inittab, does not fork into the background)
+sub do_daemon {
+	my $result = undef;
+	
+	# assume the copy is not activated
+	my $is_activated = 0;
+	
+	# check immediately at startup (once we're outside the grace period), then reset the counter later
+	my $hours_since_checked_activation_state = 0;
+	
+	$result = create_config_dir();
+	if (! defined($result)) {
+		show_error("Could not create config directory and associated files... GNU/Linux can not be activated without them!");
+	}
+	
+	# main daemon loop
+	while (1) {
+		
+		# if we're past the grace period, start the checks...
+		if ( grace_period_expired() ) {
+			# has it been long enough since we last checked activation state?
+			# (do it every hour if the machine is not genuine, so it won't take two weeks or a reboot to fix)
+			if (($hours_since_checked_activation_state > $activation_state_check_interval) or (! $is_activated)) {
+				
+				# contact the home base and see if this GNU/Linux copy is activated
+				$is_activated = check_activation_state();
+				
+				# reset the ticking clock
+				$hours_since_checked_activation_state = 0;
+				
+			# count the time until we check activation state again
+			} else {
+				$hours_since_checked_activation_state++;
+			}
+			
+			# the key server has decided this GNU/Linux copy is activated
+			# (until the next check two weeks from now)
+			if ($is_activated) {
+				# log to syslog
+				system("logger -i -p user.info -t $PROGRAM_NAME This copy of GNU/Linux is activated. See https://github.com/gnu-linux-activation-technologies/howtotell/wiki/ for details.");
+				
+			# the key server has decided this GNU/Linux copy is not activated
+			} else {
+				# log to syslog
+				system("logger -i -p user.info -t $PROGRAM_NAME This copy of GNU/Linux is not activated. See https://github.com/gnu-linux-activation-technologies/howtotell/wiki/ for details.");
+			}
+		}
+		
+		# sleep for one hour
+		sleep(3600);
+	}
+}
+
+# creates the config directory where we store our product key (if it doesn't exist already).
+#
+# accepts no arguments
+# returns 1 on success, undef on failure
+sub create_config_dir {
+	my $result = undef;
+	
+	# create the directory (if it doesn't exist)
+	if (! -e "$config_directory") {
+		$result = mkdir($config_directory);
+		if (! defined($result)) { return (undef); }
+	}
+	
+	# create the key file (if it doesn't exist)
+	if (! -e "$config_key_file") {
+		$result = open(KEY, "> $config_key_file");
+		if (! defined($result)) { return (undef); }
+		
+		close(KEY);
+	}
+	
+	return (1);
+}
+
+# calculates an sha512sum based on the current hardware configuration
+# if any of this computer's hardware changes, so will the hash (requiring re-activation).
+#
+# accepts no arguments
+# returns an sha512sum
+sub calculate_hardware_hash {
+	my $sha512sum = `(/sbin/ifconfig | grep -i ether | awk '{print \$2}' | sort -u; egrep -i 'processor|vendor_id|cpu family|model|model name|stepping') /proc/cpuinfo | sha512sum | awk '{print \$1}'`;
+	chomp($sha512sum);
+	return ($sha512sum);
+}
+
+# checks to see if the user is root or not
+#
+# accepts no arguments
+# returns 1 if the user is root, or exits with an error condition if they're not.
+sub check_root {
+	if (0 != $<) {
+		show_error("This program can only activate GNU/Linux as the root user.");
+	}
+	
+	return (1);
+}
+
+# checks to see if we're past the grace period (as defined by the mtime of
+# the product_key file, an infalliable strategy)
+#
+# accepts no arguments
+# returns 1 if we're past the grace period, and 0 if we're within the grace period
+sub grace_period_expired {
+	my @data = stat($config_key_file);
+	
+	# if the config directory is older than $grace_period days, we're outside the grace period
+	if (@data && $data[9]) {
+		if ($data[9] > (time() - ($grace_period * 24 * 60 * 60))) {
+			# we're still in the grace period, for now
+			return (0);
+		}
+	}
+	
+	# we're past the grace period
+	return (1);
+}
+
+# contacts a key server to determine if the GNU/Linux copy is activated
+#
+# accepts no arguments
+# returns 1 if the copy is activated, or 0 if it isn't
+sub check_activation_state {
+	
+	my $result = undef;
+	my $buf = undef;
+	my @lines = ();
+	my $past_headers = 0;
+	
+	# get hardware hash
+	my $hardware_hash = calculate_hardware_hash();
+	
+	# get product key
+	my $product_key = get_product_key();
+	
+	my $sock = IO::Socket::INET->new(
+		PeerAddr => $verify_domain,
+		PeerPort => 'http(80)',
+		Proto    => 'tcp'
+	);
+	
+	if ('OEM' eq $channel) {
+		$result = $sock->send("GET $verify_url?hwid=" . escape($hardware_hash) . " HTTP/1.1\nHost: $verify_domain\nUser-Agent: $PROGRAM_NAME/$VERSION\n\n");
+	} elsif ('retail' eq $channel) {
+		$result = $sock->send("GET $verify_url?hwid=" . escape($hardware_hash) . "&product_key=" . escape($product_key) . " HTTP/1.1\nHost: $verify_domain\nUser-Agent: $PROGRAM_NAME/$VERSION\n\n");
+	} elsif ('volume' eq $channel) {
+		$result = $sock->send("GET $verify_url?product_key=" . escape($product_key) . " HTTP/1.1\nHost: $verify_domain\nUser-Agent: $PROGRAM_NAME/$VERSION\n\n");
+	} else {
+		# Unknown channel
+		return (0);
+	}
+	if (! defined($result)) { return (1); }
+	
+	$result = $sock->recv($buf, 4096);
+	if (! defined($result)) { return (1); }
+	
+	@lines = split(/\n/, $buf);
+	foreach my $line (@lines) {
+		$line =~ s/\r//go;
+		$line =~ s/\n//go;
+		
+		# we found the blank line separating the headers from the body
+		if ($line eq '') {
+			$past_headers = 1;
+		}
+		
+		# if we're looking at the message body, look for either 'OK' or 'FAIL' on a line by itself
+		if ($past_headers) {
+			# OK
+			if ($line =~ m/^OK$/o) {
+				return (1);
+			}
+			# FAIL
+			if ($line =~ m/^FAIL$/o) {
+				return (0);
+			}
+		}
+	}
+	
+	# err on the side of caution
+	return (1);
+}
+
+# gets the product key, by reading it from a file
+#
+# accepts no arguments
+# returns the product key string (or a blank string, if not found)
+sub get_product_key {
+	
+	my $product_key = undef;
+	my $result = undef;
+	
+	if ( -r "$config_key_file" ) {
+		$result = open(FILE, "$config_key_file");
+		if ($result) {
+			$product_key = <FILE>;
+			close(FILE);
+			chomp($product_key);
+		}
+		
+		if ($product_key) {
+			return $product_key;
+		}
+	}
+	
+	return '';
+}
+
